@@ -1,0 +1,13 @@
+ID,source,endtrypoint,enabled,fetch_type,parse_format,schedule_cron,pagination,output_table_stagging,note
+1,cellphones,https://cellphones.com.vn/mobile.html,TRUE,html,html,0 */4 * * *,page_param=page; size=36; until=no_more,phones_staging.raw_products,
+2,tgdd,https://www.thegioididong.com/dtdd,TRUE,html,html,30 */6 * * *,cursor=next; limit=50,phones_staging.raw_products,
+,,,,,,,,,
+,,,,,,,,,
+,,,,,,,,,
+,,,,,,,,,
+,,,,,,,,,
+Note:,,,,,,,,,
+M?i 2 gi?: 0 */2 * * *,,,,,,,,,
+M?i ng…y 01:30: 30 1 * * *,,,,,,,,,
+,,,,,,,,,
+timezone=Asia/Ho_Chi_Minh,,,,,,,,,
