@@ -7,6 +7,8 @@ import pytz
 import pandas as pd
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+import schedule
+import time
 
 # --- Load biến môi trường từ file .env ---
 load_dotenv()
@@ -50,9 +52,8 @@ def get_html(url):
     return BeautifulSoup(response.text, "html.parser")
 
 
-# --- Hàm làm sạch dữ liệu chung ---
+# --- Hàm làm sạch dữ liệu ---
 def clean_price(text):
-    """Lấy phần số nguyên từ chuỗi giá (vd: '13.990.000₫' -> 13990000)."""
     if not text:
         return None
     digits = re.sub(r"[^\d]", "", text)
@@ -60,14 +61,13 @@ def clean_price(text):
 
 
 def clean_percent(text):
-    """Lấy phần số từ chuỗi phần trăm (vd: '-13%' hoặc '13%' -> 13)."""
     if not text:
         return None
     digits = re.sub(r"[^\d]", "", text)
     return int(digits) if digits else None
 
 
-# ===== CÀO DATA TỪ CELLPHONES =====
+# ===== CÀO DỮ LIỆU CELLPHONES =====
 def crawl_cellphones():
     print("Crawling Cellphones...")
     soup = get_html(URLS["cellphones"])
@@ -106,7 +106,7 @@ def crawl_cellphones():
     return pd.DataFrame(data)
 
 
-# ===== CÀO DATA TỪ THEGIOIDIDONG =====
+# ===== CÀO DỮ LIỆU TGDD =====
 def crawl_tgdd():
     print("Crawling Thegioididong...")
     soup = get_html(URLS["tgdd"])
@@ -114,26 +114,21 @@ def crawl_tgdd():
     data = []
 
     for p in products:
-        # === Ảnh sản phẩm ===
         img_tag = p.select_one(".thumb")
         image_url = None
         if img_tag:
             image_url = img_tag.get("src") or img_tag.get("data-original") or img_tag.get("data-src")
 
-        # === Tên sản phẩm ===
         name_tag = p.select_one("h3")
         product_name = name_tag.get_text(strip=True) if name_tag else None
 
-        # === Giá ===
         price_current = p.select_one("strong.price")
         price_original = p.select_one(".price-old")
         discount_percent = p.select_one(".percent")
 
-        # === Quà tặng ===
         price_gift_tag = p.select_one(".item-gift b")
         price_gift = clean_price(price_gift_tag.get_text(strip=True)) if price_gift_tag else None
 
-        # === Thêm dữ liệu vào list ===
         data.append({
             "data_id": p.get("data-id"),
             "product_name": product_name,
@@ -157,11 +152,8 @@ def crawl_tgdd():
     return pd.DataFrame(data)
 
 
-# ===== HÀM GỘP CÁC CỘT TRÙNG =====
+# ===== GỘP CỘT =====
 def merge_duplicate_columns(df: pd.DataFrame):
-    """
-    Gộp các cột trùng hoặc tương đương, ưu tiên giữ giá trị không null.
-    """
     equivalent_cols = {
         "product_name": ["product__name"],
         "installment": ["installment_info"],
@@ -182,68 +174,64 @@ def merge_duplicate_columns(df: pd.DataFrame):
 
 # ===== CHẠY CHÍNH =====
 def init():
-    # === Đọc danh sách URL từ file cấu hình ===
+    print("Bắt đầu cào dữ liệu...")
     configs = get_entrypoints("config.csv")
 
     for item in configs:
         URLS[item['source']] = item['url']
 
-    # === Crawl từ từng nguồn ===
     df1 = crawl_cellphones()
     df1["source"] = "cellphones"
 
     df2 = crawl_tgdd()
     df2["source"] = "thegioididong"
 
-    # === Gộp 2 DataFrame lại ===
     df = pd.concat([df1, df2], ignore_index=True)
-
-    # === Gộp các cột trùng tên (nếu có) ===
     df = merge_duplicate_columns(df)
 
-    # === Sắp xếp lại thứ tự cột cho hợp lý ===
     desired_order = [
-        # --- Thông tin cơ bản ---
         "product_name", "product_url", "image_url",
-
-        # --- Giá & khuyến mãi ---
         "price_current", "price_original", "price_gift", "discount_percent",
         "smember_discount", "sstudent_discount", "promotion", "installment",
-
-        # --- Thông số kỹ thuật ---
         "screen_size", "screen_resolution", "ram", "rom", "variants",
-
-        # --- Đánh giá & bán hàng ---
-        "rating", "sold_quantity",
-
-        # --- Metadata ---
-        "source", "data_id"
+        "rating", "sold_quantity", "source", "data_id"
     ]
 
-    # Giữ nguyên các cột khác (nếu có thêm)
     existing_cols = [c for c in df.columns if c not in desired_order]
     final_cols = [c for c in desired_order if c in df.columns] + existing_cols
     df = df[final_cols]
 
-    # === Thời gian hiện tại theo múi giờ Việt Nam ===
     vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
     now = datetime.now(vn_tz)
     timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
 
-    # === Tạo folder output nếu chưa có ===
     if not os.path.exists(FOLDER_LOCAL):
         os.makedirs(FOLDER_LOCAL, exist_ok=True)
-        print(f"Đã tạo thư mục: {FOLDER_LOCAL}")
 
-    # === Tạo tên file ===
     filename = f"phones_source_{timestamp}.csv"
     output_path = os.path.join(FOLDER_LOCAL, filename)
-
-    # === Xuất ra file CSV ===
     df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
-    print(f"SUCCESS — Đã xuất file: {output_path}")
+    print(f"SUCCESS — Đã xuất file: {output_path}\n")
+
+
+# ===== LỊCH TRÌNH TỰ ĐỘNG =====
+def schedule_jobs():
+    #schedule.every(30).seconds.do(init)
+    schedule.every(1).minutes.do(init)
+    # schedule.every().hour.do(init)
+    # schedule.every().day.at("00:00").do(init)
+
+    print("Đang chạy chế độ tự động... (Nhấn Ctrl + C để dừng)")
+
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(10)
+    except KeyboardInterrupt:
+        print("\nĐã dừng chương trình.")
 
 # --- Main ---
 if __name__ == "__main__":
     init()
+    schedule_jobs()
