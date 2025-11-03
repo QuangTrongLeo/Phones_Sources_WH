@@ -175,11 +175,24 @@ def merge_duplicate_columns(df: pd.DataFrame):
 # ===== CHẠY CHÍNH =====
 def init():
     print("Bắt đầu cào dữ liệu...")
-    configs = get_entrypoints("config.csv")
 
+    # --- Đảm bảo luôn đọc đúng file config.csv trong cùng thư mục script ---
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, "config.csv")
+    print(f"Đang đọc file config tại: {config_path}")
+
+    configs = get_entrypoints(config_path)
+
+    # --- Nếu không có config hợp lệ thì dừng ---
+    if not configs:
+        print("Không tìm thấy entrypoints hợp lệ trong config.csv, dừng chương trình.")
+        return
+
+    # --- Gán URL vào dict ---
     for item in configs:
         URLS[item['source']] = item['url']
 
+    # --- Cào dữ liệu ---
     df1 = crawl_cellphones()
     df1["source"] = "cellphones"
 
@@ -189,6 +202,7 @@ def init():
     df = pd.concat([df1, df2], ignore_index=True)
     df = merge_duplicate_columns(df)
 
+    # --- Sắp xếp cột ---
     desired_order = [
         "product_name", "product_url", "image_url",
         "price_current", "price_original", "price_gift", "discount_percent",
@@ -201,6 +215,7 @@ def init():
     final_cols = [c for c in desired_order if c in df.columns] + existing_cols
     df = df[final_cols]
 
+    # --- Xuất file ---
     vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
     now = datetime.now(vn_tz)
     timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
