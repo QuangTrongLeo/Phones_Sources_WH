@@ -179,8 +179,6 @@ def init():
     # --- Đảm bảo luôn đọc đúng file config.csv trong cùng thư mục script ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, "config.csv")
-    print(f"Đang đọc file config tại: {config_path}")
-
     configs = get_entrypoints(config_path)
 
     # --- Nếu không có config hợp lệ thì dừng ---
@@ -202,13 +200,20 @@ def init():
     df = pd.concat([df1, df2], ignore_index=True)
     df = merge_duplicate_columns(df)
 
+    # --- Thêm cột thời gian cào ---
+    vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
+    now = datetime.now(vn_tz)
+    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+
+    df["collected_at"] = timestamp
+
     # --- Sắp xếp cột ---
     desired_order = [
         "product_name", "product_url", "image_url",
         "price_current", "price_original", "price_gift", "discount_percent",
         "smember_discount", "sstudent_discount", "promotion", "installment",
         "screen_size", "screen_resolution", "ram", "rom", "variants",
-        "rating", "sold_quantity", "source", "data_id"
+        "rating", "sold_quantity", "source", "data_id", "collected_at"
     ]
 
     existing_cols = [c for c in df.columns if c not in desired_order]
@@ -216,10 +221,6 @@ def init():
     df = df[final_cols]
 
     # --- Xuất file ---
-    vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
-    now = datetime.now(vn_tz)
-    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
-
     if not os.path.exists(FOLDER_LOCAL):
         os.makedirs(FOLDER_LOCAL, exist_ok=True)
 
@@ -228,6 +229,7 @@ def init():
     df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
     print(f"SUCCESS — Đã xuất file: {output_path}\n")
+
 
 
 # ===== LỊCH TRÌNH TỰ ĐỘNG =====
