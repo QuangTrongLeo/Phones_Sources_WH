@@ -9,15 +9,159 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import schedule
 import time
+import mysql.connector
+from mysql.connector import Error
 
-# --- Load biến môi trường từ file .env ---
 load_dotenv()
 FOLDER = os.getenv("FOLDER")
-
-# --- URL nguồn ---
 URLS = {}
 
-# ===== LẤY DATA CỦA ENTRYPOINTS TRONG FILE CONFIG.CSV =====
+# Hàm tiện ích
+def get_html(url):
+    response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+    return BeautifulSoup(response.text, "html.parser")
+
+def clean_price(text):
+    if not text:
+        return None
+    digits = re.sub(r"[^\d]", "", text)
+    return int(digits) if digits else None
+
+def clean_percent(text):
+    if not text:
+        return None
+    digits = re.sub(r"[^\d]", "", text)
+    return int(digits) if digits else None
+
+# Kết nối đến database controller
+def get_db_controller_connection():
+    try:
+        connection = mysql.connector.connect(
+            host=os.getenv("DB_HOSTNAME"),
+            user=os.getenv("DB_USERNAME"),
+            password=os.getenv("DB_PASSWORD"),
+            port=os.getenv("DB_PORT"),
+            database=os.getenv("DB_CONTROLLER")
+        )
+        if connection.is_connected():
+            print(f"Đã kết nối đến database: {os.getenv('DB_CONTROLLER')}")
+        return connection
+    except Error as e:
+        print(f"Lỗi kết nối database: {e}")
+        return None
+
+# Đảm bảo các bảng tồn tại (tạo nếu chưa có)
+def ensure_tables(connection):
+    try:
+        cursor = connection.cursor()
+
+        tables = {
+            "config_source": """
+                CREATE TABLE config_source (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    source VARCHAR(255) UNIQUE,
+                    endtrypoint TEXT,
+                    enabled VARCHAR(10),
+                    fetch_type VARCHAR(50),
+                    parse_format VARCHAR(50),
+                    schedule_cron VARCHAR(50),
+                    pagination VARCHAR(255),
+                    output_table_stagging VARCHAR(255),
+                    note TEXT
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """,
+            "file_log": """
+                CREATE TABLE file_log (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    process_id INT,
+                    file_name VARCHAR(255),
+                    file_path VARCHAR(255),
+                    source VARCHAR(255),
+                    status VARCHAR(50),
+                    rows_count INT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    note TEXT
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """,
+            "process_log": """
+                CREATE TABLE process_log (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    step VARCHAR(255),
+                    status VARCHAR(50),
+                    start_time DATETIME,
+                    end_time DATETIME,
+                    note TEXT
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+        }
+
+        for table_name, create_sql in tables.items():
+            cursor.execute(f"""
+                SELECT COUNT(*)
+                FROM information_schema.tables 
+                WHERE table_schema = DATABASE() AND table_name = '{table_name}';
+            """)
+            exists = cursor.fetchone()[0]
+
+            if exists == 0:
+                cursor.execute(create_sql)
+                connection.commit()
+                print(f"Bảng `{table_name}` đã được tạo.")
+
+        cursor.close()
+
+    except Error as e:
+        print(f"Lỗi khi tạo bảng: {e}")
+
+# Nạp file config.csv vào bảng config_source trong DB (chỉ khi bảng rỗng)
+def load_config_to_db(connection, config_path):
+    try:
+        cursor = connection.cursor()
+        cursor.execute("SELECT COUNT(*) FROM config_source")
+        count = cursor.fetchone()[0]
+
+        db_name = os.getenv("DB_CONTROLLER") or connection.database
+
+        if count > 0:
+            cursor.close()
+            return
+
+        try:
+            df = pd.read_csv(config_path, encoding='utf-8-sig')
+        except UnicodeDecodeError:
+            df = pd.read_csv(config_path, encoding='latin1')
+
+        df.columns = df.columns.str.replace('\ufeff', '').str.strip().str.lower()
+        df = df.dropna(subset=['id', 'source'])
+        df['id'] = df['id'].astype(int)
+
+        for index, row in df.iterrows():
+            cursor.execute("""
+                INSERT INTO config_source (
+                    id, source, endtrypoint, enabled, fetch_type, parse_format,
+                    schedule_cron, pagination, output_table_stagging, note
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE
+                    source=VALUES(source),
+                    endtrypoint=VALUES(endtrypoint),
+                    enabled=VALUES(enabled),
+                    fetch_type=VALUES(fetch_type),
+                    parse_format=VALUES(parse_format),
+                    schedule_cron=VALUES(schedule_cron),
+                    pagination=VALUES(pagination),
+                    output_table_stagging=VALUES(output_table_stagging),
+                    note=VALUES(note)
+            """, tuple(row.fillna('').values))
+
+        connection.commit()
+        cursor.close()
+        print(f"Đã nạp {len(df)} dòng từ `{config_path}` vào bảng `{db_name}.config_source`.")
+
+    except Exception as e:
+        print(f"Lỗi khi nạp config.csv vào DB: {e}")
+
+# Đọc entrypoints từ file config.csv
 def get_entrypoints(config_path):
     entrypoints = []
     try:
@@ -44,30 +188,7 @@ def get_entrypoints(config_path):
 
     return entrypoints
 
-
-# --- Hàm tiện ích ---
-def get_html(url):
-    response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-    response.raise_for_status()
-    return BeautifulSoup(response.text, "html.parser")
-
-
-# --- Hàm làm sạch dữ liệu ---
-def clean_price(text):
-    if not text:
-        return None
-    digits = re.sub(r"[^\d]", "", text)
-    return int(digits) if digits else None
-
-
-def clean_percent(text):
-    if not text:
-        return None
-    digits = re.sub(r"[^\d]", "", text)
-    return int(digits) if digits else None
-
-
-# ===== CÀO DỮ LIỆU CELLPHONES =====
+# Crawl dữ liệu từ trang Cellphones
 def crawl_cellphones():
     print("Crawling Cellphones...")
     soup = get_html(URLS["cellphones"])
@@ -105,8 +226,7 @@ def crawl_cellphones():
 
     return pd.DataFrame(data)
 
-
-# ===== CÀO DỮ LIỆU TGDD =====
+# Crawl dữ liệu từ trang Thegioididong
 def crawl_tgdd():
     print("Crawling Thegioididong...")
     soup = get_html(URLS["tgdd"])
@@ -151,8 +271,7 @@ def crawl_tgdd():
 
     return pd.DataFrame(data)
 
-
-# ===== GỘP CỘT =====
+# Gộp cột trùng lặp giữa hai nguồn dữ liệu
 def merge_duplicate_columns(df: pd.DataFrame):
     equivalent_cols = {
         "product_name": ["product__name"],
@@ -171,84 +290,212 @@ def merge_duplicate_columns(df: pd.DataFrame):
 
     return df
 
+# Ghi log bắt đầu process ETL
+def log_process_start(connection, step="E", note="Data extraction"):
+    try:
+        cursor = connection.cursor()
+        vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
+        start_time = datetime.now(vn_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-# ===== CHẠY CHÍNH =====
+        cursor.execute("""
+            INSERT INTO process_log (step, status, start_time, note)
+            VALUES (%s, %s, %s, %s)
+        """, (step, "PENDING", start_time, note))
+
+        connection.commit()
+        process_id = cursor.lastrowid
+        cursor.close()
+        return process_id
+
+    except Error as e:
+        print(f"Lỗi khi ghi log process: {e}")
+        return None
+
+# Cập nhật trạng thái khi kết thúc process ETL
+def log_process_end(connection, process_id, status="COMPLETED"):
+    try:
+        cursor = connection.cursor()
+        vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
+        end_time = datetime.now(vn_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        cursor.execute("""
+            UPDATE process_log
+            SET status=%s, end_time=%s
+            WHERE id=%s
+        """, (status, end_time, process_id))
+
+        connection.commit()
+        cursor.close()
+
+    except Error as e:
+        print(f"Lỗi khi cập nhật log process: {e}")
+
+# Ghi log thông tin file sau khi xuất CSV
+def log_file(connection, process_id, file_path, status="SUCCESS", note="Exported ETL data file"):
+    try:
+        cursor = connection.cursor()
+        vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
+        created_at = datetime.now(vn_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        file_name = os.path.basename(file_path)
+
+        cursor.execute("SELECT source FROM config_source")
+        sources = [row[0] for row in cursor.fetchall()]
+        source_str = ", ".join(sources)
+
+        rows_count = 0
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8-sig") as f:
+                rows_count = sum(1 for line in f) - 1
+
+        cursor.execute("""
+            INSERT INTO file_log (process_id, file_name, file_path, source, status, rows_count, created_at, note)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (process_id, file_name, file_path, source_str, status, rows_count, created_at, note))
+
+        connection.commit()
+        cursor.close()
+
+    except Error as e:
+        print(f"Lỗi khi ghi log file: {e}")        
+
 def init():
-    print("Bắt đầu cào dữ liệu...")
+    print("Bắt đầu tiến trình ETL(Extract)...")
 
-    # --- Đảm bảo luôn đọc đúng file config.csv trong cùng thư mục script ---
+    # 1. Kết nối db_controller
+    db_conn = get_db_controller_connection()
+    process_id = None
+    output_path = ""
+
+    # 2. Kiểm tra kết nối DB thành công hay không
+    if db_conn:
+        # 2.1. Nếu kết nối DB thành công
+
+        # 3. Kiểm tra các table cần dùng trong database controller có chưa
+        tables_created = ensure_tables(db_conn)
+        if tables_created:
+            # 3.1. Nếu chưa có các table
+            print("Các table `config_source`, `process_log` và `file_log` đã được tạo.")
+            
+        # 2.1.2.  
+        try:
+            # 5. Ghi log bắt đầu process
+            process_id = log_process_start(db_conn)
+
+            # 6. Nạp file config CSV vào DB
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(script_dir, "config.csv")
+            load_config_to_db(db_conn, config_path)
+
+        except Exception as e:
+            # 2.1.2.1. Lỗi khi ghi log hoặc nạp config
+            print(f"Lỗi khi ghi log hoặc nạp config: {e}")
+            db_conn.close()
+            return
+
+    else:
+        # 2.2. Nếu kết nối DB thất bại
+        print("Không kết nối được DB_CONTROLLER.")
+
+    # 7. Lấy entrypoints từ CSV
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, "config.csv")
     configs = get_entrypoints(config_path)
 
-    # --- Nếu không có config hợp lệ thì dừng ---
+    # 8. Decision: Có entrypoints hợp lệ hay không
     if not configs:
-        print("Không tìm thấy entrypoints hợp lệ trong config.csv, dừng chương trình.")
+        # 8.1. Không có entrypoints hợp lệ
+        print("Không tìm thấy entrypoints hợp lệ trong config.csv")
+        if db_conn and process_id:
+            log_process_end(db_conn, process_id, status="FAILED")
+        if db_conn:
+            db_conn.close()
         return
 
-    # --- Gán URL vào dict ---
+    # 8.2. Có entrypoints hợp lệ
     for item in configs:
         URLS[item['source']] = item['url']
+    print(f"Đã nạp {len(configs)} nguồn dữ liệu từ config.csv")
 
-    # --- Cào dữ liệu ---
-    df1 = crawl_cellphones()
-    df1["source"] = "cellphones"
+    # 9. Crawl dữ liệu
+    try:
+        df1 = crawl_cellphones()
+        df1["source"] = "cellphones"
 
-    df2 = crawl_tgdd()
-    df2["source"] = "thegioididong"
+        df2 = crawl_tgdd()
+        df2["source"] = "thegioididong"
 
-    df = pd.concat([df1, df2], ignore_index=True)
-    df = merge_duplicate_columns(df)
+        # 10. Gộp dữ liệu
+        df = pd.concat([df1, df2], ignore_index=True)
+        df = merge_duplicate_columns(df)
 
-    # --- Thêm cột thời gian cào ---
-    vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
-    now = datetime.now(vn_tz)
-    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+        # 11. Thêm timestamp
+        vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
+        now = datetime.now(vn_tz)
+        timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+        df["collected_at"] = timestamp
 
-    df["collected_at"] = timestamp
+        # 12. Sắp xếp thứ tự cột
+        desired_order = [
+            "product_name", "product_url", "image_url",
+            "price_current", "price_original", "price_gift", "discount_percent",
+            "smember_discount", "sstudent_discount", "promotion", "installment",
+            "screen_size", "screen_resolution", "ram", "rom", "variants",
+            "rating", "sold_quantity", "source", "data_id", "collected_at"
+        ]
+        existing_cols = [c for c in df.columns if c not in desired_order]
+        final_cols = [c for c in desired_order if c in df.columns] + existing_cols
+        df = df[final_cols]
 
-    # --- Sắp xếp cột ---
-    desired_order = [
-        "product_name", "product_url", "image_url",
-        "price_current", "price_original", "price_gift", "discount_percent",
-        "smember_discount", "sstudent_discount", "promotion", "installment",
-        "screen_size", "screen_resolution", "ram", "rom", "variants",
-        "rating", "sold_quantity", "source", "data_id", "collected_at"
-    ]
+        # 13. Decision: Thư mục lưu file đã tồn tại chưa
+        if not os.path.exists(FOLDER):
+            os.makedirs(FOLDER, exist_ok=True)
+            print(f"Thư mục {FOLDER} đã được tạo.")
+        else:
+            print(f"Thư mục {FOLDER} đã tồn tại, ghi đè file mới.")
 
-    existing_cols = [c for c in df.columns if c not in desired_order]
-    final_cols = [c for c in desired_order if c in df.columns] + existing_cols
-    df = df[final_cols]
+        # 14. Xuất file CSV
+        filename = f"phones_source_{timestamp}.csv"
+        output_path = os.path.join(FOLDER, filename)
+        df.to_csv(output_path, index=False, encoding="utf-8-sig")
+        print(f"SUCCESS — Đã xuất file: {output_path}")
 
-    # --- Xuất file ---
-    if not os.path.exists(FOLDER):
-        os.makedirs(FOLDER, exist_ok=True)
+        # 15. Decision: Có DB và process_id để log file không
+        if db_conn and process_id:
+            log_file(db_conn, process_id, output_path, status="SUCCESS")
+            log_process_end(db_conn, process_id)
+        else:
+            print("Không log được vì thiếu kết nối hoặc process_id.")
 
-    filename = f"phones_source_{timestamp}.csv"
-    output_path = os.path.join(FOLDER, filename)
-    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    except Exception as e:
+        # 9.2. Crawl dữ liệu thất bại
+        print(f"Lỗi ETL: {e}")
+        if db_conn and process_id:
+            log_file(db_conn, process_id, output_path, status="FAIL", note=str(e))
+            log_process_end(db_conn, process_id, status="FAILED")
+        else:
+            print("Không log được lỗi vì thiếu kết nối DB.")
 
-    print(f"SUCCESS — Đã xuất file: {output_path}\n")
+    finally:
+        # 16. Decision: Có DB để đóng không
+        if db_conn:
+            db_conn.close()
+            print("Kết nối DB đã được đóng.")
+        else:
+            print("Không có kết nối DB để đóng.")
 
+    # 17. Hoạt động cuối
+    print("Đang chạy chế độ tự động... (Nhấn Ctrl + C để dừng)\n")
 
-
-# ===== LỊCH TRÌNH TỰ ĐỘNG =====
 def schedule_jobs():
-    #schedule.every(30).seconds.do(init)
     schedule.every(1).minutes.do(init)
-    # schedule.every().hour.do(init)
-    # schedule.every().day.at("00:00").do(init)
-
-    print("Đang chạy chế độ tự động... (Nhấn Ctrl + C để dừng)")
-
     try:
         while True:
             schedule.run_pending()
             time.sleep(10)
     except KeyboardInterrupt:
-        print("\nĐã dừng chương trình.")
+        print("Đã dừng chương trình.")
 
-# --- Main ---
 if __name__ == "__main__":
     init()
     schedule_jobs()
