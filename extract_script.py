@@ -362,49 +362,40 @@ def log_file(connection, process_id, file_path, status="SUCCESS", note="Exported
 def init():
     print("Bắt đầu tiến trình ETL(Extract)...")
 
-    # 1. Kết nối db_controller
+    # 1. Kết nối tới database controller
     db_conn = get_db_controller_connection()
     process_id = None
     output_path = ""
 
-    # 2. Kiểm tra kết nối DB thành công hay không
+    # 2. Kiểm tra kết nối DB
     if db_conn:
-        # 2.1. Nếu kết nối DB thành công
-
-        # 3. Kiểm tra các table cần dùng trong database controller có chưa
+        # 2.1. Kết nối DB thành công
+        # 3. Kiểm tra các bảng cần dùng trong DB, tạo nếu chưa tồn tại
         tables_created = ensure_tables(db_conn)
         if tables_created:
-            # 3.1. Nếu chưa có các table
+            # 3.1. Nếu các bảng chưa tồn tại, đã được tạo
             print("Các table `config_source`, `process_log` và `file_log` đã được tạo.")
-            
-        # 2.1.2.  
-        try:
-            # 5. Ghi log bắt đầu process
-            process_id = log_process_start(db_conn)
 
-            # 6. Nạp file config CSV vào DB
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(script_dir, "config.csv")
-            load_config_to_db(db_conn, config_path)
+        # 4. Ghi log bắt đầu tiến trình ETL
+        process_id = log_process_start(db_conn)
 
-        except Exception as e:
-            # 2.1.2.1. Lỗi khi ghi log hoặc nạp config
-            print(f"Lỗi khi ghi log hoặc nạp config: {e}")
-            db_conn.close()
-            return
+        # 5. Nạp file config CSV vào database nếu cần
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, "config.csv")
+        load_config_to_db(db_conn, config_path)
 
     else:
-        # 2.2. Nếu kết nối DB thất bại
+        # 2.2. Kết nối DB thất bại
         print("Không kết nối được DB_CONTROLLER.")
 
-    # 7. Lấy entrypoints từ CSV
+    # 6. Lấy entrypoints từ file config CSV
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, "config.csv")
     configs = get_entrypoints(config_path)
 
-    # 8. Decision: Có entrypoints hợp lệ hay không
+    # 7. Kiểm tra entrypoints hợp lệ
     if not configs:
-        # 8.1. Không có entrypoints hợp lệ
+        # 7.1. Không có entrypoints hợp lệ
         print("Không tìm thấy entrypoints hợp lệ trong config.csv")
         if db_conn and process_id:
             log_process_end(db_conn, process_id, status="FAILED")
@@ -412,12 +403,12 @@ def init():
             db_conn.close()
         return
 
-    # 8.2. Có entrypoints hợp lệ
+    # 7.2. Có entrypoints hợp lệ
     for item in configs:
         URLS[item['source']] = item['url']
     print(f"Đã nạp {len(configs)} nguồn dữ liệu từ config.csv")
 
-    # 9. Crawl dữ liệu
+    # 8. Crawl dữ liệu từ các nguồn
     try:
         df1 = crawl_cellphones()
         df1["source"] = "cellphones"
@@ -425,17 +416,17 @@ def init():
         df2 = crawl_tgdd()
         df2["source"] = "thegioididong"
 
-        # 10. Gộp dữ liệu
+        # 9. Gộp dữ liệu từ các nguồn
         df = pd.concat([df1, df2], ignore_index=True)
         df = merge_duplicate_columns(df)
 
-        # 11. Thêm timestamp
+        # 10. Thêm timestamp
         vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
         now = datetime.now(vn_tz)
         timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
         df["collected_at"] = timestamp
 
-        # 12. Sắp xếp thứ tự cột
+        # 11. Sắp xếp thứ tự cột
         desired_order = [
             "product_name", "product_url", "image_url",
             "price_current", "price_original", "price_gift", "discount_percent",
@@ -447,20 +438,18 @@ def init():
         final_cols = [c for c in desired_order if c in df.columns] + existing_cols
         df = df[final_cols]
 
-        # 13. Decision: Thư mục lưu file đã tồn tại chưa
+        # 12. Kiểm tra thư mục lưu file
         if not os.path.exists(FOLDER):
             os.makedirs(FOLDER, exist_ok=True)
             print(f"Thư mục {FOLDER} đã được tạo.")
-        else:
-            print(f"Thư mục {FOLDER} đã tồn tại, ghi đè file mới.")
 
-        # 14. Xuất file CSV
+        # 13. Xuất dữ liệu ra file CSV
         filename = f"phones_source_{timestamp}.csv"
         output_path = os.path.join(FOLDER, filename)
         df.to_csv(output_path, index=False, encoding="utf-8-sig")
         print(f"SUCCESS — Đã xuất file: {output_path}")
 
-        # 15. Decision: Có DB và process_id để log file không
+        # 14. Ghi log file và kết thúc tiến trình
         if db_conn and process_id:
             log_file(db_conn, process_id, output_path, status="SUCCESS")
             log_process_end(db_conn, process_id)
@@ -468,7 +457,7 @@ def init():
             print("Không log được vì thiếu kết nối hoặc process_id.")
 
     except Exception as e:
-        # 9.2. Crawl dữ liệu thất bại
+        # 8.1. Crawl dữ liệu thất bại
         print(f"Lỗi ETL: {e}")
         if db_conn and process_id:
             log_file(db_conn, process_id, output_path, status="FAIL", note=str(e))
@@ -477,14 +466,14 @@ def init():
             print("Không log được lỗi vì thiếu kết nối DB.")
 
     finally:
-        # 16. Decision: Có DB để đóng không
+        # 15. Đóng kết nối DB
         if db_conn:
             db_conn.close()
             print("Kết nối DB đã được đóng.")
         else:
             print("Không có kết nối DB để đóng.")
 
-    # 17. Hoạt động cuối
+    # 16. Hoạt động cuối
     print("Đang chạy chế độ tự động... (Nhấn Ctrl + C để dừng)\n")
 
 def schedule_jobs():
