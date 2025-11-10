@@ -12,7 +12,7 @@ import time
 
 # --- Load biến môi trường từ file .env ---
 load_dotenv()
-FOLDER_LOCAL = os.getenv("FOLDER_LOCAL")
+FOLDER = os.getenv("FOLDER")
 
 # --- URL nguồn ---
 URLS = {}
@@ -221,11 +221,11 @@ def init():
     df = df[final_cols]
 
     # --- Xuất file ---
-    if not os.path.exists(FOLDER_LOCAL):
-        os.makedirs(FOLDER_LOCAL, exist_ok=True)
+    if not os.path.exists(FOLDER):
+        os.makedirs(FOLDER, exist_ok=True)
 
     filename = f"phones_source_{timestamp}.csv"
-    output_path = os.path.join(FOLDER_LOCAL, filename)
+    output_path = os.path.join(FOLDER, filename)
     df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
     print(f"SUCCESS — Đã xuất file: {output_path}\n")
