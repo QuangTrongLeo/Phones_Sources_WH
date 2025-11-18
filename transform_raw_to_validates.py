@@ -38,6 +38,27 @@ def db_controller():
 
 
 # ==========================================
+# CHECK L1 COMPLETED BEFORE RUN
+# ==========================================
+def check_L1_completed():
+    conn = db_controller()
+    cur = conn.cursor(dictionary=True)
+
+    cur.execute("""
+        SELECT * FROM process_log
+        WHERE step = 'L1' AND status = 'COMPLETED'
+        ORDER BY end_time DESC
+        LIMIT 1
+    """)
+
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    return row is not None  # True = ok to run
+
+
+# ==========================================
 # PROCESS LOGGING
 # ==========================================
 def log_start(step):
@@ -157,7 +178,6 @@ def ensure_dim_date():
             week_of_year  TINYINT NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-
     conn.commit()
     cur.close()
     conn.close()
@@ -166,7 +186,6 @@ def ensure_dim_date():
 def ensure_phones_validated():
     conn = db_staging()
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS phones_validated (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -194,7 +213,6 @@ def ensure_phones_validated():
             INDEX idx_bk (bk_hash)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-
     conn.commit()
     cur.close()
     conn.close()
@@ -241,8 +259,14 @@ def process_t1():
     log_id, _ = log_start("T1")
 
     try:
+        # Step 0: Check if L1 Completed
+        if not check_L1_completed():
+            print("L1 NOT COMPLETED → STOP T1")
+            log_end(log_id, "SKIPPED", "L1 not completed")
+            return
+
         ensure_dim_date()
-        ensure_phones_validated()   # <-- FIX: tạo bảng trước khi truncate
+        ensure_phones_validated()  # <-- Ensure tables exist before truncating
 
         mapping = load_mapping()
 
