@@ -102,7 +102,6 @@ def clean_price(value):
     digits = "".join(ch for ch in str(value) if ch.isdigit())
     return int(digits) if digits else None
 
-
 def clean_rating(value):
     if not value:
         return None
@@ -161,11 +160,12 @@ def load_mapping():
 
 
 # ==========================================
-# ENSURE TABLES
+# ENSURE TABLE STRUCTURES
 # ==========================================
 def ensure_dim_date():
     conn = db_staging()
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS dim_date (
             date_id       INT PRIMARY KEY,
@@ -208,7 +208,9 @@ def ensure_phones_validated():
             variants TEXT,
             rating DECIMAL(3,2),
             sold_quantity VARCHAR(100),
-            data_id VARCHAR(100)
+            data_id VARCHAR(100),
+
+            INDEX idx_bk (bk_hash)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
     conn.commit()
@@ -217,7 +219,7 @@ def ensure_phones_validated():
 
 
 # ==========================================
-# TRUNCATE TABLE
+# TRUNCATE VALIDATED
 # ==========================================
 def truncate_validated():
     conn = db_staging()
@@ -229,7 +231,7 @@ def truncate_validated():
 
 
 # ==========================================
-# INSERT ROW
+# INSERT NEW ROW
 # ==========================================
 def insert_row(cursor, row):
     cursor.execute("""
@@ -251,23 +253,21 @@ def insert_row(cursor, row):
 
 
 # ==========================================
-# MAIN T1 PROCESS
+# MAIN T1 PROCESS (FULL REFRESH)
 # ==========================================
 def process_t1():
-
-    # --- Step 0: Check L1 ---
-    if not check_L1_completed():
-        print("L1 NOT COMPLETED → STOP T1")
-        log_id, _ = log_start("T1")
-        log_end(log_id, "SKIPPED", "L1 not completed")
-        return
-
-    # --- Step 1: Log start ---
     log_id, _ = log_start("T1")
 
     try:
+        # Step 0: Check if L1 Completed
+        if not check_L1_completed():
+            print("L1 NOT COMPLETED → STOP T1")
+            log_end(log_id, "SKIPPED", "L1 not completed")
+            return
+
         ensure_dim_date()
-        ensure_phones_validated()
+        ensure_phones_validated()  # <-- Ensure tables exist before truncating
+
         mapping = load_mapping()
 
         conn = db_staging()
@@ -303,15 +303,13 @@ def process_t1():
         conn.close()
 
         log_end(log_id, "COMPLETED", f"Inserted={inserted}")
-        print(f"T1 COMPLETED — Inserted: {inserted}")
+
+        print(f"T1 Transform completed: {inserted} rows inserted")
 
     except Exception as e:
         log_end(log_id, "FAILED", str(e))
         raise e
 
 
-# ==========================================
-# RUN
-# ==========================================
 if __name__ == "__main__":
     process_t1()
