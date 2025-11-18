@@ -38,6 +38,27 @@ def db_controller():
 
 
 # ==========================================
+# CHECK L1 COMPLETED BEFORE RUN
+# ==========================================
+def check_L1_completed():
+    conn = db_controller()
+    cur = conn.cursor(dictionary=True)
+
+    cur.execute("""
+        SELECT * FROM process_log
+        WHERE step = 'L1' AND status = 'COMPLETED'
+        ORDER BY end_time DESC
+        LIMIT 1
+    """)
+
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    return row is not None  # True = ok to run
+
+
+# ==========================================
 # PROCESS LOGGING
 # ==========================================
 def log_start(step):
@@ -80,6 +101,7 @@ def clean_price(value):
         return None
     digits = "".join(ch for ch in str(value) if ch.isdigit())
     return int(digits) if digits else None
+
 
 def clean_rating(value):
     if not value:
@@ -139,12 +161,11 @@ def load_mapping():
 
 
 # ==========================================
-# ENSURE TABLE STRUCTURES
+# ENSURE TABLES
 # ==========================================
 def ensure_dim_date():
     conn = db_staging()
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS dim_date (
             date_id       INT PRIMARY KEY,
@@ -157,7 +178,6 @@ def ensure_dim_date():
             week_of_year  TINYINT NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-
     conn.commit()
     cur.close()
     conn.close()
@@ -166,7 +186,6 @@ def ensure_dim_date():
 def ensure_phones_validated():
     conn = db_staging()
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS phones_validated (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -189,19 +208,16 @@ def ensure_phones_validated():
             variants TEXT,
             rating DECIMAL(3,2),
             sold_quantity VARCHAR(100),
-            data_id VARCHAR(100),
-
-            INDEX idx_bk (bk_hash)
+            data_id VARCHAR(100)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
-
     conn.commit()
     cur.close()
     conn.close()
 
 
 # ==========================================
-# TRUNCATE VALIDATED
+# TRUNCATE TABLE
 # ==========================================
 def truncate_validated():
     conn = db_staging()
@@ -213,7 +229,7 @@ def truncate_validated():
 
 
 # ==========================================
-# INSERT NEW ROW
+# INSERT ROW
 # ==========================================
 def insert_row(cursor, row):
     cursor.execute("""
@@ -235,15 +251,23 @@ def insert_row(cursor, row):
 
 
 # ==========================================
-# MAIN T1 PROCESS (FULL REFRESH)
+# MAIN T1 PROCESS
 # ==========================================
 def process_t1():
+
+    # --- Step 0: Check L1 ---
+    if not check_L1_completed():
+        print("L1 NOT COMPLETED → STOP T1")
+        log_id, _ = log_start("T1")
+        log_end(log_id, "SKIPPED", "L1 not completed")
+        return
+
+    # --- Step 1: Log start ---
     log_id, _ = log_start("T1")
 
     try:
         ensure_dim_date()
-        ensure_phones_validated()   # <-- FIX: tạo bảng trước khi truncate
-
+        ensure_phones_validated()
         mapping = load_mapping()
 
         conn = db_staging()
@@ -279,13 +303,15 @@ def process_t1():
         conn.close()
 
         log_end(log_id, "COMPLETED", f"Inserted={inserted}")
-
-        print(f"T1 Transform completed: {inserted} rows inserted")
+        print(f"T1 COMPLETED — Inserted: {inserted}")
 
     except Exception as e:
         log_end(log_id, "FAILED", str(e))
         raise e
 
 
+# ==========================================
+# RUN
+# ==========================================
 if __name__ == "__main__":
     process_t1()
