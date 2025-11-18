@@ -393,7 +393,7 @@ def init():
     process_id = None
     output_path = ""
 
-    # 3.1 Kết nối OK?
+    # 3.1 Kết nối DB OK?
     if not db_conn:
         # 3.2 Lỗi kết nối DB
         print("Không kết nối được DB_CONTROLLER.")
@@ -401,15 +401,16 @@ def init():
 
     # 4. Kiểm tra bảng DB
     tables_exist = check_tables_exist(db_conn)
+
     # 4.1 Bảng tồn tại?
     if not tables_exist:
         # 4.2 Tạo bảng mới
         create_tables(db_conn)
 
-    # 5. Ghi process_log
+    # 5. Ghi process_log START
     process_id = log_process_start(db_conn)
 
-    # 6. Load config & lấy entrypoints
+    # 6. Load config.csv & lấy entrypoints
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, "config.csv")
     load_config_to_db(db_conn, config_path)
@@ -436,9 +437,11 @@ def init():
         df2["source"] = "thegioididong"
 
         # 8.1 Crawl thành công?
+
         # 9. Xử lý dữ liệu trước khi xuất CSV
         df = pd.concat([df1, df2], ignore_index=True)
         df = merge_duplicate_columns(df)
+
         vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
         now = datetime.now(vn_tz)
         timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
@@ -466,9 +469,10 @@ def init():
         df.to_csv(output_path, index=False, encoding="utf-8-sig")
         print(f"SUCCESS — Đã xuất file: {output_path}")
 
-        # 12. Ghi log file vào DB (SUCCESS)
+        # 12. Ghi file_log vào DB (SUCCESS)
         log_file(db_conn, process_id, output_path, status="SUCCESS")
-        # 13. Ghi log process END (COMPLETED)
+
+        # 13. Ghi process_log END (COMPLETED)
         log_process_end(db_conn, process_id)
 
     except Exception as e:
