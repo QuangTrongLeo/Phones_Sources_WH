@@ -38,24 +38,34 @@ def db_controller():
 
 
 # ==========================================
-# CHECK L1 COMPLETED BEFORE RUN
+# CHECK L1 COMPLETED
 # ==========================================
 def check_L1_completed():
     conn = db_controller()
     cur = conn.cursor(dictionary=True)
-
     cur.execute("""
-        SELECT * FROM process_log
-        WHERE step = 'L1' AND status = 'COMPLETED'
-        ORDER BY end_time DESC
-        LIMIT 1
+        SELECT end_time FROM process_log
+        WHERE step='L1' AND status='COMPLETED'
+        ORDER BY end_time DESC LIMIT 1
     """)
-
     row = cur.fetchone()
     cur.close()
     conn.close()
+    return row is not None
 
-    return row is not None  # True = ok to run
+
+def get_L1_time():
+    conn = db_controller()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("""
+        SELECT end_time FROM process_log
+        WHERE step='L1' AND status='COMPLETED'
+        ORDER BY end_time DESC LIMIT 1
+    """)
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row["end_time"] if row else None
 
 
 # ==========================================
@@ -81,13 +91,11 @@ def log_start(step):
 def log_end(log_id, status, note=None):
     conn = db_controller()
     cur = conn.cursor()
-
     cur.execute("""
         UPDATE process_log
         SET status=%s, end_time=%s, note=%s
         WHERE id=%s
     """, (status, datetime.now(), note, log_id))
-
     conn.commit()
     cur.close()
     conn.close()
@@ -160,12 +168,11 @@ def load_mapping():
 
 
 # ==========================================
-# ENSURE TABLE STRUCTURES
+# ENSURE TABLES
 # ==========================================
 def ensure_dim_date():
     conn = db_staging()
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS dim_date (
             date_id       INT PRIMARY KEY,
@@ -210,6 +217,9 @@ def ensure_phones_validated():
             sold_quantity VARCHAR(100),
             data_id VARCHAR(100),
 
+            execute_at DATETIME,
+            load_staging_time DATETIME,
+
             INDEX idx_bk (bk_hash)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
@@ -219,7 +229,7 @@ def ensure_phones_validated():
 
 
 # ==========================================
-# TRUNCATE VALIDATED
+# TRUNCATE TABLE
 # ==========================================
 def truncate_validated():
     conn = db_staging()
@@ -231,7 +241,7 @@ def truncate_validated():
 
 
 # ==========================================
-# INSERT NEW ROW
+# INSERT ROW
 # ==========================================
 def insert_row(cursor, row):
     cursor.execute("""
@@ -240,14 +250,16 @@ def insert_row(cursor, row):
             product_name, image_url, price_current, price_original,
             price_gift, discount_percent, promotion, installment,
             screen_size, screen_resolution, ram, rom, variants,
-            rating, sold_quantity, data_id
+            rating, sold_quantity, data_id,
+            execute_at, load_staging_time
         )
         VALUES (
             %(bk_hash)s, %(source)s, %(product_url)s,
             %(product_name)s, %(image_url)s, %(price_current)s, %(price_original)s,
             %(price_gift)s, %(discount_percent)s, %(promotion)s, %(installment)s,
             %(screen_size)s, %(screen_resolution)s, %(ram)s, %(rom)s, %(variants)s,
-            %(rating)s, %(sold_quantity)s, %(data_id)s
+            %(rating)s, %(sold_quantity)s, %(data_id)s,
+            %(execute_at)s, %(load_staging_time)s
         )
     """, row)
 
@@ -259,20 +271,21 @@ def process_t1():
     log_id, _ = log_start("T1")
 
     try:
-        # Step 0: Check if L1 Completed
         if not check_L1_completed():
             print("L1 NOT COMPLETED → STOP T1")
             log_end(log_id, "SKIPPED", "L1 not completed")
             return
 
         ensure_dim_date()
-        ensure_phones_validated()  # <-- Ensure tables exist before truncating
+        ensure_phones_validated()
 
         mapping = load_mapping()
 
+        execute_time = datetime.now()
+        l1_time = get_L1_time()
+
         conn = db_staging()
         cursor = conn.cursor(dictionary=True)
-
         cursor.execute("SELECT * FROM phones_raw")
         rows = cursor.fetchall()
 
@@ -280,7 +293,6 @@ def process_t1():
             log_end(log_id, "NO_DATA", "phones_raw empty")
             return
 
-        # FULL REFRESH
         truncate_validated()
 
         inserted = 0
@@ -289,7 +301,9 @@ def process_t1():
             row = {
                 "source": r.get("source"),
                 "product_url": r.get("product_url"),
-                "bk_hash": hashlib.md5(f"{r.get('source')}||{r.get('product_url')}".encode()).hexdigest()
+                "bk_hash": hashlib.md5(f"{r.get('source')}||{r.get('product_url')}".encode()).hexdigest(),
+                "execute_at": execute_time,
+                "load_staging_time": l1_time
             }
 
             for src, tgt, dtype in mapping:
@@ -303,8 +317,7 @@ def process_t1():
         conn.close()
 
         log_end(log_id, "COMPLETED", f"Inserted={inserted}")
-
-        print(f"T1 Transform completed: {inserted} rows inserted")
+        print(f"T1 COMPLETED — {inserted} rows inserted")
 
     except Exception as e:
         log_end(log_id, "FAILED", str(e))
