@@ -140,15 +140,21 @@ def clean_rating(value):
         return None
 
 
-def cast_value(value, dtype):
+def cast_value(value, dtype, target_field=None):
     if value is None:
         return None
 
     dtype = dtype.upper()
 
+    # --- SPECIAL CASE: discount_percent giữ nguyên % ---
+    if target_field == "discount_percent":
+        return str(value).strip()   # giữ nguyên chuỗi gốc
+
+    # Rating DECIMAL(3,2)
     if dtype == "DECIMAL(3,2)":
         return clean_rating(value)
 
+    # Decimal or int → price
     if dtype.startswith("DECIMAL") or dtype.startswith("INT"):
         return clean_price(value)
 
@@ -186,7 +192,7 @@ def ensure_phones_validated():
             price_current DECIMAL(12,0),
             price_original DECIMAL(12,0),
             price_gift DECIMAL(12,0),
-            discount_percent INT,
+            discount_percent VARCHAR(50),      -- LƯU CHUỖI, GIỮ NGUYÊN %
             promotion TEXT,
             installment TEXT,
             screen_size VARCHAR(100),
@@ -258,10 +264,9 @@ def process_t1():
             log_end(log_id, "SKIPPED", "L1 not completed")
             return
 
-        # 2) Ensure validated table exists
         ensure_phones_validated()
-
         mapping = load_mapping()
+
         execute_time = datetime.now()
         l1_time = get_L1_time()
 
@@ -274,7 +279,6 @@ def process_t1():
             log_end(log_id, "NO_DATA", "phones_raw empty")
             return
 
-        # 3) FULL REFRESH
         truncate_validated()
 
         inserted = 0
@@ -288,7 +292,7 @@ def process_t1():
             }
 
             for src, tgt, dtype in mapping:
-                row[tgt] = cast_value(r.get(src), dtype)
+                row[tgt] = cast_value(r.get(src), dtype, target_field=tgt)
 
             insert_row(cursor, row)
             inserted += 1
