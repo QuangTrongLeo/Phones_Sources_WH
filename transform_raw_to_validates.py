@@ -1,7 +1,7 @@
 import os
 import csv
 import hashlib
-from datetime import datetime, date
+from datetime import datetime
 from dotenv import load_dotenv
 import mysql.connector
 from decimal import Decimal
@@ -110,6 +110,7 @@ def clean_price(value):
     digits = "".join(ch for ch in str(value) if ch.isdigit())
     return int(digits) if digits else None
 
+
 def clean_rating(value):
     if not value:
         return None
@@ -168,28 +169,8 @@ def load_mapping():
 
 
 # ==========================================
-# ENSURE TABLES
+# ENSURE TABLE phones_validated
 # ==========================================
-def ensure_dim_date():
-    conn = db_staging()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS dim_date (
-            date_id       INT PRIMARY KEY,
-            date_value    DATE NOT NULL,
-            year_num      SMALLINT NOT NULL,
-            month_num     TINYINT NOT NULL,
-            day_of_month  TINYINT NOT NULL,
-            day_of_week   TINYINT NOT NULL,
-            is_weekend    TINYINT NOT NULL,
-            week_of_year  TINYINT NOT NULL
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
 def ensure_phones_validated():
     conn = db_staging()
     cur = conn.cursor()
@@ -229,7 +210,7 @@ def ensure_phones_validated():
 
 
 # ==========================================
-# TRUNCATE TABLE
+# TRUNCATE VALIDATED
 # ==========================================
 def truncate_validated():
     conn = db_staging()
@@ -265,22 +246,22 @@ def insert_row(cursor, row):
 
 
 # ==========================================
-# MAIN T1 PROCESS (FULL REFRESH)
+# MAIN T1 PROCESS
 # ==========================================
 def process_t1():
     log_id, _ = log_start("T1")
 
     try:
+        # 1) Check L1
         if not check_L1_completed():
             print("L1 NOT COMPLETED → STOP T1")
             log_end(log_id, "SKIPPED", "L1 not completed")
             return
 
-        ensure_dim_date()
+        # 2) Ensure validated table exists
         ensure_phones_validated()
 
         mapping = load_mapping()
-
         execute_time = datetime.now()
         l1_time = get_L1_time()
 
@@ -293,10 +274,10 @@ def process_t1():
             log_end(log_id, "NO_DATA", "phones_raw empty")
             return
 
+        # 3) FULL REFRESH
         truncate_validated()
 
         inserted = 0
-
         for r in rows:
             row = {
                 "source": r.get("source"),
