@@ -8,7 +8,7 @@ import mysql.connector
 load_dotenv(".env")
 
 DB_HOST = os.getenv("DB_HOSTNAME")
-DB_PORT = int(os.getenv("DB_PORT"))
+DB_PORT = os.getenv("DB_PORT")
 DB_USER = os.getenv("DB_USERNAME")
 DB_PASS = os.getenv("DB_PASSWORD")
 DB_STAGING = os.getenv("DB_STAGING")
@@ -20,59 +20,107 @@ MAPPING_FILE = "field_mapping.csv"
 def db_staging():
     """Kết nối DB staging (phones_raw, phones_validated)."""
     return mysql.connector.connect(
-        host=DB_HOST, port=DB_PORT,
-        user=DB_USER, password=DB_PASS, database=DB_STAGING
+        host=DB_HOST,
+        port=int(DB_PORT),
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_STAGING
     )
 
 
 def db_controller():
     """Kết nối DB controller (process_log)."""
     return mysql.connector.connect(
-        host=DB_HOST, port=DB_PORT,
-        user=DB_USER, password=DB_PASS, database=DB_CONTROLLER
+        host=DB_HOST,
+        port=int(DB_PORT),
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_CONTROLLER
     )
 
 
-def check_L1_completed():
-    """Bước 1: kiểm tra L1 gần nhất đã COMPLETED hay chưa."""
+def validate_env():
+    """
+    Kiểm tra các biến môi trường bắt buộc trong .env đã được cấu hình đầy đủ chưa.
+    Nếu thiếu -> raise RuntimeError để process_t1() ghi FAILED.
+    """
+    required_keys = [
+        "DB_HOSTNAME",
+        "DB_PORT",
+        "DB_USERNAME",
+        "DB_PASSWORD",
+        "DB_STAGING",
+        "DB_CONTROLLER",
+    ]
+    missing = [k for k in required_keys if os.getenv(k) in (None, "")]
+    if missing:
+        raise RuntimeError(f"Missing ENV config: {', '.join(missing)}")
+
+
+def get_last_step_time(step_name, statuses=("COMPLETED",)):
+    """
+    Lấy end_time mới nhất của 1 step (L1, T1, ...) với các trạng thái cho trước.
+    Dùng để so sánh L1 vs T1.
+    """
     conn = db_controller()
     cur = conn.cursor(dictionary=True)
-    cur.execute("""
-        SELECT end_time FROM process_log
-        WHERE step='L1' AND status='COMPLETED'
-        ORDER BY end_time DESC LIMIT 1
-    """)
+    placeholders = ",".join(["%s"] * len(statuses))
+    cur.execute(
+        f"""
+        SELECT MAX(end_time) AS last_time
+        FROM process_log
+        WHERE step = %s
+          AND status IN ({placeholders})
+        """,
+        (step_name, *statuses),
+    )
     row = cur.fetchone()
     cur.close()
     conn.close()
-    return row is not None
+    return row["last_time"] if row and row["last_time"] else None
 
 
-def get_L1_time():
-    """Lấy end_time của L1 gần nhất (dùng cho load_staging_time)."""
-    conn = db_controller()
-    cur = conn.cursor(dictionary=True)
-    cur.execute("""
-        SELECT end_time FROM process_log
-        WHERE step='L1' AND status='COMPLETED'
-        ORDER BY end_time DESC LIMIT 1
-    """)
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row["end_time"] if row else None
+def can_run_T1():
+    """
+    2.x Kiểm tra điều kiện tiền đề cho T1.
+
+    Chỉ cho phép chạy T1 nếu:
+      - Có L1 COMPLETED (last_L1 không NULL)
+      - Và:
+          + chưa có T1 COMPLETED nào (last_T1 is NULL), HOẶC
+          + last_L1 > last_T1  (nghĩa là có L1 mới hơn lần T1 trước)
+
+    Trả về:
+      - can_run: True/False
+      - l1_time: end_time của L1 mới nhất (dùng làm load_staging_time)
+    """
+    last_L1 = get_last_step_time("L1", ("COMPLETED",))
+    if last_L1 is None:
+        # 2.1: Chưa có L1 COMPLETED → không chạy T1
+        return False, None
+
+    last_T1 = get_last_step_time("T1", ("COMPLETED",))
+
+    # 2.2: Đánh giá điều kiện L1 mới hơn T1
+    if last_T1 is None or last_L1 > last_T1:
+        return True, last_L1
+    else:
+        return False, last_L1
 
 
 def log_start(step):
-    """Bước 0: ghi log bắt đầu step T1 (status = RUNNING)."""
+    """0.x: ghi log bắt đầu 1 step (status = RUNNING)."""
     conn = db_controller()
     cur = conn.cursor()
     now = datetime.now()
 
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO process_log(step, status, start_time)
         VALUES (%s, 'RUNNING', %s)
-    """, (step, now))
+        """,
+        (step, now),
+    )
 
     conn.commit()
     log_id = cur.lastrowid
@@ -82,14 +130,17 @@ def log_start(step):
 
 
 def log_end(log_id, status, note=None):
-    """Bước 8/9: cập nhật trạng thái kết thúc step T1."""
+    """Ghi trạng thái kết thúc step (COMPLETED / SKIPPED / NO_DATA / FAILED)."""
     conn = db_controller()
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         UPDATE process_log
         SET status=%s, end_time=%s, note=%s
         WHERE id=%s
-    """, (status, datetime.now(), note, log_id))
+        """,
+        (status, datetime.now(), note, log_id),
+    )
     conn.commit()
     cur.close()
     conn.close()
@@ -134,7 +185,7 @@ def clean_rating(value):
 
 
 def cast_value(value, dtype, target_field=None):
-    """Ép kiểu theo datatype & field đích (Bước 6.2)."""
+    """Dùng trong 9.2 – Ép kiểu theo datatype & field đích."""
     if value is None:
         return None
 
@@ -157,21 +208,28 @@ def cast_value(value, dtype, target_field=None):
 
 
 def load_mapping():
-    """Bước 2.2: đọc field_mapping.csv (source_field → target_field, datatype)."""
+    """3.2 Đọc field_mapping.csv (source_field → target_field, datatype)."""
     mapping = []
     with open(MAPPING_FILE, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             if row["active_flag"].strip() == "1":
-                mapping.append((row["source_field"], row["target_field"], row["target_datatype"]))
+                mapping.append(
+                    (
+                        row["source_field"],
+                        row["target_field"],
+                        row["target_datatype"],
+                    )
+                )
     return mapping
 
 
 def ensure_phones_validated():
-    """Bước 2.1: đảm bảo tồn tại bảng phones_validated."""
+    """3.1 Đảm bảo tồn tại bảng phones_validated."""
     conn = db_staging()
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS phones_validated (
             id INT AUTO_INCREMENT PRIMARY KEY,
             source VARCHAR(100),
@@ -200,14 +258,15 @@ def ensure_phones_validated():
 
             INDEX idx_bk (bk_hash)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """)
+        """
+    )
     conn.commit()
     cur.close()
     conn.close()
 
 
 def truncate_validated():
-    """Bước 5: xoá dữ liệu cũ trong phones_validated."""
+    """8. Xoá dữ liệu cũ trong phones_validated trước khi insert batch mới."""
     conn = db_staging()
     cur = conn.cursor()
     cur.execute("TRUNCATE TABLE phones_validated")
@@ -217,8 +276,9 @@ def truncate_validated():
 
 
 def insert_row(cursor, row):
-    """Bước 6.3: insert 1 dòng đã chuẩn hoá vào phones_validated."""
-    cursor.execute("""
+    """9.3 Insert 1 dòng đã chuẩn hoá vào phones_validated."""
+    cursor.execute(
+        """
         INSERT INTO phones_validated (
             bk_hash, source, product_url,
             product_name, image_url, price_current, price_original,
@@ -235,62 +295,101 @@ def insert_row(cursor, row):
             %(rating)s, %(sold_quantity)s, %(data_id)s,
             %(execute_at)s, %(load_staging_time)s
         )
-    """, row)
+        """,
+        row,
+    )
 
 
 def process_t1():
     """
-    THỨ TỰ CÁC BƯỚC TRONG WORKFLOW T1 (phones_raw → phones_validated):
+    LUỒNG TỔNG THỂ T1 (phones_raw → phones_validated)
 
-    Bước 0: Ghi log bắt đầu step T1.
-    Bước 1: Kiểm tra L1 đã COMPLETED hay chưa.
-    Bước 2: Chuẩn bị môi trường (bảng validated + mapping).
-    Bước 3: Lấy thời gian thực thi & thời điểm kết thúc L1.
-    Bước 4: Đọc dữ liệu nguồn từ phones_raw.
-    Bước 5: Xoá dữ liệu cũ trong phones_validated.
-    Bước 6: Chuẩn hoá & insert từng dòng vào phones_validated.
-    Bước 7: Commit & đóng kết nối.
-    Bước 8: Ghi log COMPLETED / NO_DATA.
-    Bước 9: Nếu có exception → ghi log FAILED.
+    0.  log_start("T1") – ghi log bắt đầu.
+    1.  validate_env() – kiểm tra cấu hình .env.
+    2.  can_run_T1() – kiểm tra điều kiện tiền đề (L1 mới hơn T1?).
+
+    3.  Chuẩn bị môi trường:
+        3.1 ensure_phones_validated() – đảm bảo bảng đích tồn tại.
+        3.2 load_mapping() – đọc field_mapping.csv (active_flag = 1).
+
+    4.  Kiểm tra mapping hợp lệ (mapping không rỗng).
+    5.  Chuẩn bị thời gian:
+        - execute_time = thời điểm chạy T1.
+        - load_staging_time = end_time L1 mới nhất.
+
+    6.  Kết nối DB staging & đọc dữ liệu nguồn:
+        - Mở kết nối db_staging().
+        - SELECT * FROM phones_raw → rows.
+
+    7.  Kiểm tra có dữ liệu trong phones_raw hay không.
+    8.  TRUNCATE phones_validated – xoá batch cũ.
+    9.  Vòng lặp chuẩn hoá & insert:
+        9.1 Build row cơ bản (source, product_url, bk_hash, time).
+        9.2 Áp dụng mapping + cast_value() cho từng field.
+        9.3 insert_row() – ghi vào phones_validated & tăng inserted++.
+
+    10. Commit transaction & đóng connection.
+    11. log_end(..., "COMPLETED", note="Inserted={inserted}").
+
+    Exception: Nếu có lỗi bất kỳ → log_end(..., "FAILED", note=message).
     """
-    # Bước 0: log start T1
+    # 0. Ghi log bắt đầu T1
     log_id, _ = log_start("T1")
 
     try:
-        # Bước 1: kiểm tra điều kiện tiền đề – L1 phải COMPLETED
-        if not check_L1_completed():
+        # 1. Kiểm tra .env trước (nếu thiếu config → raise, sẽ vào except)
+        validate_env()
+
+        # 2. Kiểm tra điều kiện tiền đề (L1 mới hơn T1?)
+        can_run, l1_time = can_run_T1()
+        if not can_run:
             print("L1 NOT COMPLETED → STOP T1")
-            log_end(log_id, "SKIPPED", "L1 not completed")
+            log_end(log_id, "SKIPPED", "L1 NOT COMPLETED")
             return
 
-        # Bước 2: chuẩn bị môi trường T1
-        ensure_phones_validated()      # 2.1: đảm bảo bảng validated
-        mapping = load_mapping()       # 2.2: load cấu hình mapping
+        # 3. Chuẩn bị môi trường T1
+        # 3.1 Đảm bảo bảng phones_validated tồn tại
+        ensure_phones_validated()
+        # 3.2 Load cấu hình mapping từ CSV
+        mapping = load_mapping()
 
-        # Bước 3: lấy thời gian thực thi & thời điểm L1
+        # 4. Kiểm tra mapping hợp lệ (không rỗng)
+        if not mapping:
+            print("INVALID MAPPING → STOP T1")
+            log_end(log_id, "FAILED", "Invalid or empty field_mapping.csv")
+            return
+
+        # 5. Lấy thời gian thực thi & thời điểm L1
         execute_time = datetime.now()
-        l1_time = get_L1_time()
+        load_staging_time = l1_time  # dùng làm load_staging_time
 
-        # Bước 4: đọc dữ liệu nguồn từ phones_raw
-        conn = db_staging()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM phones_raw")
-        rows = cursor.fetchall()
+        # 6. Kết nối DB staging & đọc dữ liệu từ phones_raw
+        try:
+            # 6.1 Mở kết nối & tạo cursor dictionary
+            conn = db_staging()
+            cursor = conn.cursor(dictionary=True)
+            # 6.2 Đọc toàn bộ dữ liệu từ phones_raw
+            cursor.execute("SELECT * FROM phones_raw")
+            rows = cursor.fetchall()
+        except Exception as db_err:
+            # Lỗi kết nối / truy vấn DB staging
+            log_end(log_id, "FAILED", f"DB_STAGING error: {db_err}")
+            return
 
+        # 7. Kiểm tra có dữ liệu hay không
         if not rows:
-            # Không có dữ liệu → kết thúc với NO_DATA
             cursor.close()
             conn.close()
             log_end(log_id, "NO_DATA", "phones_raw empty")
             return
 
-        # Bước 5: xoá dữ liệu cũ trong phones_validated
+        # 8. Xoá dữ liệu cũ trong phones_validated
         truncate_validated()
 
-        # Bước 6: chuẩn hoá & insert từng dòng
+        # 9. Chuẩn hoá & insert từng dòng
         inserted = 0
         for r in rows:
-            # 6.1: build row cơ bản (source, url, hash, thời gian)
+            # 9.1 Xây dựng row cơ bản (source, url, hash, thời gian)
             row = {
                 "source": r.get("source"),
                 "product_url": r.get("product_url"),
@@ -298,28 +397,28 @@ def process_t1():
                     f"{r.get('source')}||{r.get('product_url')}".encode()
                 ).hexdigest(),
                 "execute_at": execute_time,
-                "load_staging_time": l1_time
+                "load_staging_time": load_staging_time,
             }
 
-            # 6.2: apply mapping + cast datatype
+            # 9.2 Áp dụng mapping + ép kiểu datatype
             for src, tgt, dtype in mapping:
                 row[tgt] = cast_value(r.get(src), dtype, target_field=tgt)
 
-            # 6.3: insert dòng đã chuẩn hoá
+            # 9.3 Insert dòng đã chuẩn hoá vào phones_validated
             insert_row(cursor, row)
             inserted += 1
 
-        # Bước 7: commit & đóng kết nối
+        # 10. Commit & đóng kết nối
         conn.commit()
         cursor.close()
         conn.close()
 
-        # Bước 8: log COMPLETED
+        # 11. Ghi log COMPLETED
         log_end(log_id, "COMPLETED", f"Inserted={inserted}")
         print(f"T1 COMPLETED — {inserted} rows inserted")
 
     except Exception as e:
-        # Bước 9: lỗi → log FAILED
+        # Ngoại lệ tổng → FAILED
         log_end(log_id, "FAILED", str(e))
         raise e
 
