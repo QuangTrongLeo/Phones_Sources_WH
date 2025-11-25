@@ -6,9 +6,6 @@ from dotenv import load_dotenv
 import mysql.connector
 from decimal import Decimal
 
-# ==========================================
-# LOAD ENV
-# ==========================================
 load_dotenv(".env")
 
 DB_HOST = os.getenv("DB_HOSTNAME")
@@ -21,9 +18,6 @@ DB_CONTROLLER = os.getenv("DB_CONTROLLER")
 MAPPING_FILE = "field_mapping.csv"
 
 
-# ==========================================
-# CONNECT DB
-# ==========================================
 def db_staging():
     return mysql.connector.connect(
         host=DB_HOST, port=DB_PORT,
@@ -37,9 +31,6 @@ def db_controller():
     )
 
 
-# ==========================================
-# CHECK L1 COMPLETED
-# ==========================================
 def check_L1_completed():
     conn = db_controller()
     cur = conn.cursor(dictionary=True)
@@ -68,9 +59,6 @@ def get_L1_time():
     return row["end_time"] if row else None
 
 
-# ==========================================
-# PROCESS LOGGING
-# ==========================================
 def log_start(step):
     conn = db_controller()
     cur = conn.cursor()
@@ -101,9 +89,6 @@ def log_end(log_id, status, note=None):
     conn.close()
 
 
-# ==========================================
-# VALUE HELPERS
-# ==========================================
 def clean_price(value):
     if not value:
         return None
@@ -146,24 +131,18 @@ def cast_value(value, dtype, target_field=None):
 
     dtype = dtype.upper()
 
-    # --- SPECIAL CASE: discount_percent giữ nguyên % ---
     if target_field == "discount_percent":
-        return str(value).strip()   # giữ nguyên chuỗi gốc
+        return str(value).strip()   
 
-    # Rating DECIMAL(3,2)
     if dtype == "DECIMAL(3,2)":
         return clean_rating(value)
 
-    # Decimal or int → price
     if dtype.startswith("DECIMAL") or dtype.startswith("INT"):
         return clean_price(value)
 
     return value
 
 
-# ==========================================
-# LOAD MAPPING
-# ==========================================
 def load_mapping():
     mapping = []
     with open(MAPPING_FILE, "r", encoding="utf-8-sig") as f:
@@ -174,9 +153,6 @@ def load_mapping():
     return mapping
 
 
-# ==========================================
-# ENSURE TABLE phones_validated
-# ==========================================
 def ensure_phones_validated():
     conn = db_staging()
     cur = conn.cursor()
@@ -214,10 +190,6 @@ def ensure_phones_validated():
     cur.close()
     conn.close()
 
-
-# ==========================================
-# TRUNCATE VALIDATED
-# ==========================================
 def truncate_validated():
     conn = db_staging()
     cur = conn.cursor()
@@ -227,9 +199,6 @@ def truncate_validated():
     conn.close()
 
 
-# ==========================================
-# INSERT ROW
-# ==========================================
 def insert_row(cursor, row):
     cursor.execute("""
         INSERT INTO phones_validated (
@@ -251,14 +220,10 @@ def insert_row(cursor, row):
     """, row)
 
 
-# ==========================================
-# MAIN T1 PROCESS
-# ==========================================
 def process_t1():
     log_id, _ = log_start("T1")
 
     try:
-        # 1) Check L1
         if not check_L1_completed():
             print("L1 NOT COMPLETED → STOP T1")
             log_end(log_id, "SKIPPED", "L1 not completed")
