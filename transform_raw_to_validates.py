@@ -4,11 +4,7 @@ import hashlib
 from datetime import datetime
 from dotenv import load_dotenv
 import mysql.connector
-from decimal import Decimal
 
-# ==========================================
-# LOAD ENV
-# ==========================================
 load_dotenv(".env")
 
 DB_HOST = os.getenv("DB_HOSTNAME")
@@ -21,26 +17,24 @@ DB_CONTROLLER = os.getenv("DB_CONTROLLER")
 MAPPING_FILE = "field_mapping.csv"
 
 
-# ==========================================
-# CONNECT DB
-# ==========================================
 def db_staging():
+    """Kết nối DB staging (phones_raw, phones_validated)."""
     return mysql.connector.connect(
         host=DB_HOST, port=DB_PORT,
         user=DB_USER, password=DB_PASS, database=DB_STAGING
     )
 
+
 def db_controller():
+    """Kết nối DB controller (process_log)."""
     return mysql.connector.connect(
         host=DB_HOST, port=DB_PORT,
         user=DB_USER, password=DB_PASS, database=DB_CONTROLLER
     )
 
 
-# ==========================================
-# CHECK L1 COMPLETED
-# ==========================================
 def check_L1_completed():
+    """Bước 1: kiểm tra L1 gần nhất đã COMPLETED hay chưa."""
     conn = db_controller()
     cur = conn.cursor(dictionary=True)
     cur.execute("""
@@ -55,6 +49,7 @@ def check_L1_completed():
 
 
 def get_L1_time():
+    """Lấy end_time của L1 gần nhất (dùng cho load_staging_time)."""
     conn = db_controller()
     cur = conn.cursor(dictionary=True)
     cur.execute("""
@@ -68,10 +63,8 @@ def get_L1_time():
     return row["end_time"] if row else None
 
 
-# ==========================================
-# PROCESS LOGGING
-# ==========================================
 def log_start(step):
+    """Bước 0: ghi log bắt đầu step T1 (status = RUNNING)."""
     conn = db_controller()
     cur = conn.cursor()
     now = datetime.now()
@@ -89,6 +82,7 @@ def log_start(step):
 
 
 def log_end(log_id, status, note=None):
+    """Bước 8/9: cập nhật trạng thái kết thúc step T1."""
     conn = db_controller()
     cur = conn.cursor()
     cur.execute("""
@@ -101,10 +95,8 @@ def log_end(log_id, status, note=None):
     conn.close()
 
 
-# ==========================================
-# VALUE HELPERS
-# ==========================================
 def clean_price(value):
+    """Chuẩn hóa giá: giữ lại chữ số, trả về INT hoặc None."""
     if not value:
         return None
     digits = "".join(ch for ch in str(value) if ch.isdigit())
@@ -112,6 +104,7 @@ def clean_price(value):
 
 
 def clean_rating(value):
+    """Chuẩn hóa rating về thang 5.0, DECIMAL(3,2)."""
     if not value:
         return None
     s = str(value).strip()
@@ -141,30 +134,30 @@ def clean_rating(value):
 
 
 def cast_value(value, dtype, target_field=None):
+    """Ép kiểu theo datatype & field đích (Bước 6.2)."""
     if value is None:
         return None
 
     dtype = dtype.upper()
 
-    # --- SPECIAL CASE: discount_percent giữ nguyên % ---
+    # Giữ nguyên % cho discount_percent
     if target_field == "discount_percent":
-        return str(value).strip()   # giữ nguyên chuỗi gốc
+        return str(value).strip()
 
-    # Rating DECIMAL(3,2)
+    # Rating
     if dtype == "DECIMAL(3,2)":
         return clean_rating(value)
 
-    # Decimal or int → price
+    # Giá / số
     if dtype.startswith("DECIMAL") or dtype.startswith("INT"):
         return clean_price(value)
 
+    # Mặc định trả về nguyên giá trị
     return value
 
 
-# ==========================================
-# LOAD MAPPING
-# ==========================================
 def load_mapping():
+    """Bước 2.2: đọc field_mapping.csv (source_field → target_field, datatype)."""
     mapping = []
     with open(MAPPING_FILE, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -174,10 +167,8 @@ def load_mapping():
     return mapping
 
 
-# ==========================================
-# ENSURE TABLE phones_validated
-# ==========================================
 def ensure_phones_validated():
+    """Bước 2.1: đảm bảo tồn tại bảng phones_validated."""
     conn = db_staging()
     cur = conn.cursor()
     cur.execute("""
@@ -192,7 +183,7 @@ def ensure_phones_validated():
             price_current DECIMAL(12,0),
             price_original DECIMAL(12,0),
             price_gift DECIMAL(12,0),
-            discount_percent VARCHAR(50),      -- LƯU CHUỖI, GIỮ NGUYÊN %
+            discount_percent VARCHAR(50),
             promotion TEXT,
             installment TEXT,
             screen_size VARCHAR(100),
@@ -215,10 +206,8 @@ def ensure_phones_validated():
     conn.close()
 
 
-# ==========================================
-# TRUNCATE VALIDATED
-# ==========================================
 def truncate_validated():
+    """Bước 5: xoá dữ liệu cũ trong phones_validated."""
     conn = db_staging()
     cur = conn.cursor()
     cur.execute("TRUNCATE TABLE phones_validated")
@@ -227,10 +216,8 @@ def truncate_validated():
     conn.close()
 
 
-# ==========================================
-# INSERT ROW
-# ==========================================
 def insert_row(cursor, row):
+    """Bước 6.3: insert 1 dòng đã chuẩn hoá vào phones_validated."""
     cursor.execute("""
         INSERT INTO phones_validated (
             bk_hash, source, product_url,
@@ -251,60 +238,88 @@ def insert_row(cursor, row):
     """, row)
 
 
-# ==========================================
-# MAIN T1 PROCESS
-# ==========================================
 def process_t1():
+    """
+    THỨ TỰ CÁC BƯỚC TRONG WORKFLOW T1 (phones_raw → phones_validated):
+
+    Bước 0: Ghi log bắt đầu step T1.
+    Bước 1: Kiểm tra L1 đã COMPLETED hay chưa.
+    Bước 2: Chuẩn bị môi trường (bảng validated + mapping).
+    Bước 3: Lấy thời gian thực thi & thời điểm kết thúc L1.
+    Bước 4: Đọc dữ liệu nguồn từ phones_raw.
+    Bước 5: Xoá dữ liệu cũ trong phones_validated.
+    Bước 6: Chuẩn hoá & insert từng dòng vào phones_validated.
+    Bước 7: Commit & đóng kết nối.
+    Bước 8: Ghi log COMPLETED / NO_DATA.
+    Bước 9: Nếu có exception → ghi log FAILED.
+    """
+    # Bước 0: log start T1
     log_id, _ = log_start("T1")
 
     try:
-        # 1) Check L1
+        # Bước 1: kiểm tra điều kiện tiền đề – L1 phải COMPLETED
         if not check_L1_completed():
             print("L1 NOT COMPLETED → STOP T1")
             log_end(log_id, "SKIPPED", "L1 not completed")
             return
 
-        ensure_phones_validated()
-        mapping = load_mapping()
+        # Bước 2: chuẩn bị môi trường T1
+        ensure_phones_validated()      # 2.1: đảm bảo bảng validated
+        mapping = load_mapping()       # 2.2: load cấu hình mapping
 
+        # Bước 3: lấy thời gian thực thi & thời điểm L1
         execute_time = datetime.now()
         l1_time = get_L1_time()
 
+        # Bước 4: đọc dữ liệu nguồn từ phones_raw
         conn = db_staging()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM phones_raw")
         rows = cursor.fetchall()
 
         if not rows:
+            # Không có dữ liệu → kết thúc với NO_DATA
+            cursor.close()
+            conn.close()
             log_end(log_id, "NO_DATA", "phones_raw empty")
             return
 
+        # Bước 5: xoá dữ liệu cũ trong phones_validated
         truncate_validated()
 
+        # Bước 6: chuẩn hoá & insert từng dòng
         inserted = 0
         for r in rows:
+            # 6.1: build row cơ bản (source, url, hash, thời gian)
             row = {
                 "source": r.get("source"),
                 "product_url": r.get("product_url"),
-                "bk_hash": hashlib.md5(f"{r.get('source')}||{r.get('product_url')}".encode()).hexdigest(),
+                "bk_hash": hashlib.md5(
+                    f"{r.get('source')}||{r.get('product_url')}".encode()
+                ).hexdigest(),
                 "execute_at": execute_time,
                 "load_staging_time": l1_time
             }
 
+            # 6.2: apply mapping + cast datatype
             for src, tgt, dtype in mapping:
                 row[tgt] = cast_value(r.get(src), dtype, target_field=tgt)
 
+            # 6.3: insert dòng đã chuẩn hoá
             insert_row(cursor, row)
             inserted += 1
 
+        # Bước 7: commit & đóng kết nối
         conn.commit()
         cursor.close()
         conn.close()
 
+        # Bước 8: log COMPLETED
         log_end(log_id, "COMPLETED", f"Inserted={inserted}")
         print(f"T1 COMPLETED — {inserted} rows inserted")
 
     except Exception as e:
+        # Bước 9: lỗi → log FAILED
         log_end(log_id, "FAILED", str(e))
         raise e
 
