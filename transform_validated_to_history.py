@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-transform_validated_to_history.py
-
-SCD Type 2 loader from phones_validated -> phones_history.
-
-- Uses mysql.connector (no SQLAlchemy).
-- Writes process_log rows into phones_controller.process_log (controller DB).
-- Uses GET_LOCK on controller DB to avoid concurrent runs.
-- Uses buffered cursors or fetchall() to avoid "Unread result found".
-- CLI flags: --debug / -d ; --force / -f ; optional batch size (int)
-
-Save and run:
-    python transform_validated_to_history.py --debug
-"""
-
 import os
 import sys
 import hashlib
@@ -63,7 +47,6 @@ def conn_controller():
 # 2. UTIL FUNCTIONS
 # ---------------------------
 def compute_md5_for_row_dict(d: dict, ignore_cols=None) -> str:
-    """Compute MD5 deterministically over columns (sorted keys), represent None as <NULL>."""
     if ignore_cols is None:
         ignore_cols = set()
     keys = [k for k in d.keys() if k not in ignore_cols]
@@ -84,7 +67,6 @@ def yesterday_end_of_day() -> datetime:
     return datetime(y.year, y.month, y.day, 23, 59, 59)
 
 def sanitize_param(v):
-    """Return Python-MySQL friendly value. mysql.connector will manage types."""
     if v is None:
         return None
     # If it's a datetime-like with tzinfo, remove tzinfo
@@ -96,11 +78,6 @@ def sanitize_param(v):
 # 3. PROCESS LOG HELPERS (phones_controller.process_log)
 # ---------------------------
 def acquire_job_lock(ctrl_conn, lock_name=LOCK_NAME, timeout=LOCK_TIMEOUT):
-    """
-    Acquire named lock (MySQL GET_LOCK) using controller connection.
-    Returns True if acquired.
-    We use controller connection so lock is visible across jobs.
-    """
     cur = ctrl_conn.cursor(buffered=True)
     try:
         cur.execute("SELECT GET_LOCK(%s, %s)", (lock_name, timeout))
@@ -122,14 +99,10 @@ def release_job_lock(ctrl_conn, lock_name=LOCK_NAME):
         cur.close()
 
 def log_insert_running(ctrl_conn, step):
-    """
-    Insert a RUNNING row into controller.process_log and return the inserted id.
-    Uses autocommit connection.
-    """
     cur = ctrl_conn.cursor(buffered=True)
     try:
         now = datetime.now()
-        cur.execute("INSERT INTO process_log (step, status, start_time) VALUES (%s, 'RUNNING', %s)", (step, now))
+        cur.execute("INSERT INTO process_log (step, status, start_time) VALUES (%s, 'Pending', %s)", (step, now))
         # mysql.connector with autocommit True commits automatically
         cur.execute("SELECT LAST_INSERT_ID()")
         lid = cur.fetchone()[0]
@@ -157,15 +130,15 @@ def log_insert_skipped(ctrl_conn, step, reason):
     finally:
         cur.close()
 
-def check_L1_completed():
+def check_T1_completed():
     """
     Return True if there exists a row in phones_controller.process_log
-    with step='L1' AND status='COMPLETED'.
+    with step='T1' AND status='COMPLETED'.
     """
     ctrl = conn_controller()
     cur = ctrl.cursor(dictionary=True, buffered=True)
     try:
-        cur.execute("SELECT end_time FROM process_log WHERE step='L1' AND status='COMPLETED' ORDER BY end_time DESC LIMIT 1")
+        cur.execute("SELECT end_time FROM process_log WHERE step='T1' AND status='COMPLETED' ORDER BY end_time DESC LIMIT 1")
         row = cur.fetchone()
         cur.fetchall()
         return bool(row)
@@ -197,8 +170,8 @@ def get_history_columns(st_conn):
 def scd2_t2(batch_limit=None, debug=False, force=False):
     """
     Main flow — numbered:
-    1) Pre-check L1 completed
-      1.1) If L1 not completed -> insert SKIPPED into controller.process_log and exit
+    1) Pre-check T1 completed
+      1.1) If T1 not completed -> insert SKIPPED into controller.process_log and exit
     2) Acquire job-level lock (GET_LOCK) on controller DB
     3) Insert RUNNING row into controller.process_log
     4) Load phones_validated from staging
@@ -214,11 +187,11 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
     7) On error -> update controller.process_log to FAILED with error note and release lock
     8) Always release job lock
     """
-    # 1) Check L1
+    # 1) Check T1
     if debug:
         print(f"[{PROCESS_STEP}] START — batch={batch_limit}, debug={debug}, force={force}")
-    if not check_L1_completed():
-        reason = "L1 not completed; skipping T2"
+    if not check_T1_completed():
+        reason = "T1 not completed; skipping T2"
         if debug:
             print(f"[{PROCESS_STEP}] SKIPPED: {reason}")
         ctrl = conn_controller()
@@ -229,7 +202,10 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
         return
 
     # 2) Acquire job lock (on controller)
+   #2.1 kết nối đến controller DB
     ctrl_conn = conn_controller()
+    #2.2 cố gắng lấy lock
+     #nếu không lấy được thì đóng kết nối và thoát
     got_lock = acquire_job_lock(ctrl_conn, LOCK_NAME, LOCK_TIMEOUT)
     if not got_lock:
         if debug:
@@ -280,20 +256,23 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
         inserted = 0
         closed = 0
 
-        # group by business_key: we will take the last occurrence if multiple
-        # simple approach: build dict mapping bk->row (last wins)
+        # nhóm theo business key và lấy hàng mới nhất cho mỗi business key
+        # mỗi business key chỉ có 1 hàng để xử lý
+         # sử dụng dict để ghi đè các hàng cùng business key, giữ lại hàng cuối 
         latest_by_bk = {}
         for r in rows:
             latest_by_bk[r["business_key"]] = r
 
-        # 5) Process each BK
+        # 5) các tiến trình mỗi business key
+         # lặp qua từng business key và xử lý
         for bk, row in latest_by_bk.items():
-            # 5.1 compute md5
+            # 5.1 tính md5 mới cho hàng hiện tại
             new_md5 = compute_md5_for_row_dict(row, IGNORE_COLS)
             if debug:
                 print(f"[{PROCESS_STEP}] BK={bk} md5={new_md5}")
 
-            # 5.2 Start a DB transaction on staging to do SELECT ... FOR UPDATE then updates/inserts
+            # 5.2 bắt đầu 1 kết nối giao dịch để xử lý SCD2
+             # sử dụng cursor dictionary, buffered
             tx_cursor = st_conn.cursor(dictionary=True, buffered=True)
             try:
                 
@@ -308,7 +287,8 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
 
                 if currow is None:
                     # 5.3 NEW -> insert
-                    # prepare payload dictionary containing only columns that exist in phones_history
+                    # chuẩn bị payload để load các cột cần thiết
+                     # bỏ qua các cột id, business_key và các cột không có trong history
                     payload = {}
                     for c, v in row.items():
                         if c in {"id", "business_key"}:
@@ -316,7 +296,7 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
                         if c not in history_cols:
                             continue
                         payload[c] = sanitize_param(v)
-                    # add SCD control columns
+                    # thêm scd control cols
                     if "dataTimeExpired" in history_cols:
                         payload["dataTimeExpired"] = datetime(2100, 12, 31, 23, 59, 59)
                     if "is_current" in history_cols:
@@ -325,7 +305,8 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
                         payload["runtime_md5"] = new_md5
 
                     if not payload:
-                        # nothing to insert (no matching cols)
+                        # không có gì để insert -> rollback
+                         # rollback để hủy khóa
                         st_conn.rollback()
                         if debug:
                             print(f"[{PROCESS_STEP}] BK={bk} nothing to insert (no matching history columns)")
@@ -341,21 +322,22 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
                         print(f"[{PROCESS_STEP}] BK={bk} inserted (NEW)")
 
                 else:
-                    # 5.4 Exists -> compare md5s
+                    # 5.4 đối chiêu md5 
                     sid_old = currow.get("SID")
                     old_md5 = currow.get("runtime_md5")
 
                     if (not force) and old_md5 and (old_md5 == new_md5):
-                        # duplicate -> no action
+                        # có đúng -> không làm gì cả
+                        # rollback để hủy khóa
                         st_conn.rollback()
                         if debug:
                             print(f"[{PROCESS_STEP}] BK={bk} duplicate -> no action")
                         continue
 
-                    # changed -> close old
+                    # có thay đổi (hoặc force) -> đóng cũ + thêm mới
                     yend = yesterday_end_of_day()
                     tx_cursor.execute("UPDATE phones_history SET dataTimeExpired=%s, is_current=0 WHERE SID=%s AND is_current=1", (yend, sid_old))
-                    # insert new
+                    # thêm mới
                     payload = {}
                     for c, v in row.items():
                         if c in {"id", "business_key"}:
@@ -381,7 +363,8 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
                         if debug:
                             print(f"[{PROCESS_STEP}] BK={bk} closed SID={sid_old} and inserted new")
                     else:
-                        # nothing to insert -> rollback the update too
+                        # không có gì để insert sau khi đóng
+                         # rollback để hủy đóng
                         st_conn.rollback()
                         if debug:
                             print(f"[{PROCESS_STEP}] BK={bk} had change but nothing to insert (no matching cols)")
@@ -392,7 +375,7 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
             finally:
                 tx_cursor.close()
 
-        # 6) finalize: mark controller process_log as COMPLETED
+        # 6) đánh dấu, cập nhập completed với note tóm tắt
         note = f"Inserted={inserted};Closed={closed}"
         log_end(ctrl_conn, last_log_id, "COMPLETED", note)
         if debug:
@@ -427,7 +410,7 @@ def scd2_t2(batch_limit=None, debug=False, force=False):
         traceback.print_exc()
         raise
     finally:
-        # 8) Always release lock and close conns
+        # 7) xóa lock , giải phóng kết nối
         try:
             release_job_lock(ctrl_conn, LOCK_NAME)
         except Exception:
