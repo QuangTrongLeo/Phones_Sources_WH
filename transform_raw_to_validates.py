@@ -81,19 +81,7 @@ def get_last_step_time(step_name, statuses=("COMPLETED",)):
 
 
 def can_run_T1():
-    """
-    2.x Kiểm tra điều kiện tiền đề cho T1.
 
-    Chỉ cho phép chạy T1 nếu:
-      - Có L1 COMPLETED (last_L1 không NULL)
-      - Và:
-          + chưa có T1 COMPLETED nào (last_T1 is NULL), HOẶC
-          + last_L1 > last_T1  (nghĩa là có L1 mới hơn lần T1 trước)
-
-    Trả về:
-      - can_run: True/False
-      - l1_time: end_time của L1 mới nhất (dùng làm load_staging_time)
-    """
     last_L1 = get_last_step_time("L1", ("COMPLETED",))
     if last_L1 is None:
         # 2.1: Chưa có L1 COMPLETED → không chạy T1
@@ -301,38 +289,6 @@ def insert_row(cursor, row):
 
 
 def process_t1():
-    """
-    LUỒNG TỔNG THỂ T1 (phones_raw → phones_validated)
-
-    0.  log_start("T1") – ghi log bắt đầu.
-    1.  validate_env() – kiểm tra cấu hình .env.
-    2.  can_run_T1() – kiểm tra điều kiện tiền đề (L1 mới hơn T1?).
-
-    3.  Chuẩn bị môi trường:
-        3.1 ensure_phones_validated() – đảm bảo bảng đích tồn tại.
-        3.2 load_mapping() – đọc field_mapping.csv (active_flag = 1).
-
-    4.  Kiểm tra mapping hợp lệ (mapping không rỗng).
-    5.  Chuẩn bị thời gian:
-        - execute_time = thời điểm chạy T1.
-        - load_staging_time = end_time L1 mới nhất.
-
-    6.  Kết nối DB staging & đọc dữ liệu nguồn:
-        - Mở kết nối db_staging().
-        - SELECT * FROM phones_raw → rows.
-
-    7.  Kiểm tra có dữ liệu trong phones_raw hay không.
-    8.  TRUNCATE phones_validated – xoá batch cũ.
-    9.  Vòng lặp chuẩn hoá & insert:
-        9.1 Build row cơ bản (source, product_url, bk_hash, time).
-        9.2 Áp dụng mapping + cast_value() cho từng field.
-        9.3 insert_row() – ghi vào phones_validated & tăng inserted++.
-
-    10. Commit transaction & đóng connection.
-    11. log_end(..., "COMPLETED", note="Inserted={inserted}").
-
-    Exception: Nếu có lỗi bất kỳ → log_end(..., "FAILED", note=message).
-    """
     # 0. Ghi log bắt đầu T1
     log_id, _ = log_start("T1")
 
